@@ -57,7 +57,12 @@ fn main() {
             .long("filter")
             .short("F")
             .takes_value(false)
-             .help("filter sequences falling below a threshold"))
+            .help("filter sequences falling below a threshold"))
+         .arg(Arg::with_name("measure_window")
+             .long("measure_window")
+             .short("s")
+             .takes_value(false)
+             .help("Measure complexity along sequences using a sliding window"))
         .arg(Arg::with_name("version")
              .long("version")
              .short("V")
@@ -75,15 +80,18 @@ fn main() {
         false => RecordType::Fastq,
     };
 
-    let filter_or_mask = (args.is_present("mask") as bool, args.is_present("filter") as bool);
+    let filter_or_mask_or_measurewindow = (args.is_present("mask") as bool,
+                                           args.is_present("filter") as bool,
+                                           args.is_present("measure_window") as bool);
 
-    if filter_or_mask.0 && filter_or_mask.1 {
-        error_exit("cannot filter and mask")
-    }
+    // if filter_or_mask.0 && filter_or_mask.1 {
+    //     error_exit("cannot filter and mask")
+    // }
 
-    let task = match filter_or_mask {
-        (true, false) => Task::Mask,
-        (false, true) => Task::Filter,
+    let task = match filter_or_mask_or_measurewindow {
+        (true, false, false) => Task::Mask,
+        (false, true, false) => Task::Filter,
+        (false, false, true) => Task::WindowMeasure,
         _ => Task::Measure
     };
 
@@ -111,11 +119,11 @@ fn main() {
         .trim()
         .parse()
         .expect("'--threshold' must be a number between 0-1");
-    
+
     if threshold < 0.0 || threshold > 1.0 {
         error_exit("'--threshold' must be a number between 0-1");
     }
-    
+
     let window_size: usize = args
         .value_of("window_size")
         .unwrap()
@@ -140,7 +148,8 @@ enum RecordType {
 enum Task {
     Mask,
     Measure,
-    Filter
+    Filter,
+    WindowMeasure
 }
 
 enum MaskType {
@@ -151,7 +160,7 @@ enum MaskType {
 fn complexity(record_type: RecordType, task: Task, k: u32, threshold: f64, window_size: usize, mask_type: MaskType) {
     let alphabet = alphabets::dna::iupac_alphabet();
     let rank = RankTransform::new(&alphabet);
-    
+
     match record_type {
         RecordType::Fasta => {
             let mut writer = fasta::Writer::new(io::stdout());
@@ -171,6 +180,10 @@ fn complexity(record_type: RecordType, task: Task, k: u32, threshold: f64, windo
                             let kmers = unique_kmers(seq, k, &rank);
                             println!("{}\t{}\t{}\t{}", id, length, kmers, kmers as f64 / length as f64);
                         },
+                        Task::WindowMeasure => {
+                            let window_size_modified = window_size + 1 - k as usize ;
+                            slidding_window_complexity_measure(seq, id, &rank, k, window_size_modified);
+                        }
                         Task::Filter => {
                             let length = seq.len();
                             let kmers = unique_kmers(seq, k, &rank);
@@ -179,11 +192,11 @@ fn complexity(record_type: RecordType, task: Task, k: u32, threshold: f64, windo
                                 writer.write(id, r.desc(), &seq).unwrap();
                             }
                         }
-                    } 
-                    
+                    }
+
                 })
                 .collect::<Vec<()>>();
-        }, 
+        },
         RecordType::Fastq => {
             let mut writer = fastq::Writer::new(io::stdout());
             let records = fastq::Reader::new(io::stdin()).records();
@@ -202,6 +215,10 @@ fn complexity(record_type: RecordType, task: Task, k: u32, threshold: f64, windo
                             let kmers = unique_kmers(seq, k, &rank);
                             println!("{}\t{}\t{}\t{}", id, length, kmers, kmers as f64 / length as f64);
                         }
+                        Task::WindowMeasure => {
+                            let window_size_modified = window_size + 1 - k as usize ;
+                            slidding_window_complexity_measure(seq, id, &rank, k, window_size_modified);
+                        }
                         Task::Filter => {
                             let length = seq.len();
                             let kmers = unique_kmers(seq, k, &rank);
@@ -210,7 +227,7 @@ fn complexity(record_type: RecordType, task: Task, k: u32, threshold: f64, windo
                                 writer.write(id, r.desc(), &seq, r.qual()).unwrap();
                             }
                         }
-                    } 
+                    }
                 })
                 .collect::<Vec<()>>();
         }
@@ -227,13 +244,74 @@ fn unique_kmers(text: &[u8], k: u32, rank: &RankTransform) -> usize {
         .collect::<FnvHashSet<usize>>()
         .len()
 }
+fn slidding_window_complexity_measure(text: &[u8], id: &str, rank: &RankTransform,  q: u32, window_size: usize){
+    let mut intervals: Vec<Interval> = Vec::new();
+    let mut window: VecDeque<usize> = VecDeque::with_capacity(window_size);
+    let mut kmer_iterator = rank.qgrams(q, text).into_iter();
+    let mut kmers: FnvHashMap<usize, usize> = FnvHashMap::default();
+
+    // Init: fill window buffer
+    for _ in 0..window_size {
+        match kmer_iterator.next() {
+            Some(kmer) => window.push_back(kmer),
+            None => break
+        }
+    }
+    // Count kmers in window
+    for kmer in window.iter() {
+        let n = kmers.entry(*kmer).or_insert(0);
+        *n += 1;
+    }
+
+    let mut idx = 0;
+    loop {
+        let window_complexity = kmers.len() as f64 / (window.len() - 1 + q as usize) as f64;
+
+        // | idx + window.len() == text.len()
+
+        // println!("{:?}", idx );
+        if idx % (window.len() - 1 + q as usize) == 0 {
+            let start = idx;
+            let end = idx + (window.len() - 1 + q as usize);
+            // let end = idx + window.len();
+            println!("{}\t{}\t{}\t{}\t{}\t{}", id, (window.len() - 1 + q as usize), start, end, kmers.len(), window_complexity);
+
+        }
+        // else if idx + (window.len() - 1 + q as usize) == text.len() {
+        //     let start = idx;
+        //     let end = idx + (window.len() - 1 + q as usize);
+        //     println!("(idx + window len {:?} == text len {})",  idx + window.len(),  text.len() );
+        //     println!("{}\t{}\t{}\t{}\t{}\t{}", id, end-start, start, end, kmers.len(), window_complexity);
+        // }
+
+        match kmer_iterator.next() {
+            Some(kmer) => {
+                let prev = window.pop_front().unwrap();
+                window.push_back(kmer);
+                // Update kmer counts: remove 1 from leaving kmer
+                let prev_n = *kmers.get(&prev).unwrap();
+                if prev_n == 1 {
+                    kmers.remove(&prev);
+                } else {
+                    kmers.insert(prev, prev_n-1);
+                }
+                // Update kmer counts: add 1 for entering kmer
+                let next_n = kmers.entry(kmer).or_insert(0);
+                *next_n += 1;
+                // Update index
+                idx += 1;
+            },
+            None => break,
+        }
+    }
+}
 
 fn lc_intervals(text: &[u8], q: u32, rank: &RankTransform, threshold: f64, window_size: usize) -> Vec<Interval> {
     let mut intervals: Vec<Interval> = Vec::new();
     let mut window: VecDeque<usize> = VecDeque::with_capacity(window_size);
     let mut kmer_iterator = rank.qgrams(q, text).into_iter();
     let mut kmers: FnvHashMap<usize, usize> = FnvHashMap::default();
- 
+
     // Init: fill window buffer
     for _ in 0..window_size {
         match kmer_iterator.next() {
