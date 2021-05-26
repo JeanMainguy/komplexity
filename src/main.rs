@@ -68,6 +68,11 @@ fn main() {
              .short("V")
              .takes_value(false)
              .help("print version info"))
+         .arg(Arg::with_name("step")
+                 .long("step")
+                 .short("p")
+                 .takes_value(true)
+                 .default_value("20"))
         .get_matches();
 
     if args.is_present("version") {
@@ -130,8 +135,13 @@ fn main() {
         .trim()
         .parse()
         .expect("'--window_size' must be an integer greater than 0");
-
-    complexity(record_type, task, k, threshold, window_size, mask_type);
+    let step: usize = args
+        .value_of("step")
+        .unwrap()
+        .trim()
+        .parse()
+        .expect("'--step' must be an integer greater than 0");
+    complexity(record_type, task, k, threshold, window_size, mask_type, step);
 }
 
 #[derive(Debug)]
@@ -157,7 +167,7 @@ enum MaskType {
     LowerCase
 }
 
-fn complexity(record_type: RecordType, task: Task, k: u32, threshold: f64, window_size: usize, mask_type: MaskType) {
+fn complexity(record_type: RecordType, task: Task, k: u32, threshold: f64, window_size: usize, mask_type: MaskType, step:usize) {
     let alphabet = alphabets::dna::iupac_alphabet();
     let rank = RankTransform::new(&alphabet);
 
@@ -182,7 +192,7 @@ fn complexity(record_type: RecordType, task: Task, k: u32, threshold: f64, windo
                         },
                         Task::WindowMeasure => {
                             let window_size_modified = window_size + 1 - k as usize ;
-                            slidding_window_complexity_measure(seq, id, &rank, k, window_size_modified);
+                            slidding_window_complexity_measure(seq, id, &rank, k, window_size_modified, step);
                         }
                         Task::Filter => {
                             let length = seq.len();
@@ -217,7 +227,7 @@ fn complexity(record_type: RecordType, task: Task, k: u32, threshold: f64, windo
                         }
                         Task::WindowMeasure => {
                             let window_size_modified = window_size + 1 - k as usize ;
-                            slidding_window_complexity_measure(seq, id, &rank, k, window_size_modified);
+                            slidding_window_complexity_measure(seq, id, &rank, k, window_size_modified, step);
                         }
                         Task::Filter => {
                             let length = seq.len();
@@ -244,12 +254,13 @@ fn unique_kmers(text: &[u8], k: u32, rank: &RankTransform) -> usize {
         .collect::<FnvHashSet<usize>>()
         .len()
 }
-fn slidding_window_complexity_measure(text: &[u8], id: &str, rank: &RankTransform,  q: u32, window_size: usize){
+fn slidding_window_complexity_measure(text: &[u8], id: &str, rank: &RankTransform,  q: u32, window_size: usize, step:usize){
     let mut intervals: Vec<Interval> = Vec::new();
     let mut window: VecDeque<usize> = VecDeque::with_capacity(window_size);
     let mut kmer_iterator = rank.qgrams(q, text).into_iter();
     let mut kmers: FnvHashMap<usize, usize> = FnvHashMap::default();
 
+    println!("chrm\twindow\tstart\tend\tkmers\tcomplexity");
     // Init: fill window buffer
     for _ in 0..window_size {
         match kmer_iterator.next() {
@@ -270,9 +281,10 @@ fn slidding_window_complexity_measure(text: &[u8], id: &str, rank: &RankTransfor
         // | idx + window.len() == text.len()
 
         // println!("{:?}", idx );
-        if idx % (window.len() - 1 + q as usize) == 0 {
+
+        if idx % step == 0 { //(window.len() - 1 + q as usize) == 0 {
             let start = idx;
-            let end = idx + (window.len() - 1 + q as usize);
+            let end = idx + step;// (window.len() - 1 + q as usize);
             // let end = idx + window.len();
             println!("{}\t{}\t{}\t{}\t{}\t{}", id, (window.len() - 1 + q as usize), start, end, kmers.len(), window_complexity);
 
